@@ -1,0 +1,316 @@
+-- Lucky Family Database Schema for Supabase
+-- This schema supports multi-family households with proper relationships
+
+-- Enable UUID extension for better primary keys
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- Enable Row Level Security
+ALTER DATABASE postgres SET "app.jwt_secret" TO 'your-jwt-secret-here';
+
+-- 1. FAMILIES TABLE
+-- Represents a household/family unit
+CREATE TABLE families (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name VARCHAR(100) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    timezone VARCHAR(50) DEFAULT 'UTC',
+    settings JSONB DEFAULT '{
+        "theme": "default",
+        "notifications": true,
+        "weekly_reset": true
+    }'::jsonb
+);
+
+-- 2. FAMILY MEMBERS TABLE
+-- Individual people within a family
+CREATE TABLE family_members (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    family_id UUID NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+    name VARCHAR(50) NOT NULL,
+    role VARCHAR(20) NOT NULL CHECK (role IN ('Mom', 'Dad', 'Kids', 'Everyone', 'Pets')),
+    color VARCHAR(20) DEFAULT 'blue',
+    avatar_url TEXT,
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    
+    -- Ensure unique names within a family
+    UNIQUE(family_id, name)
+);
+
+-- 3. TASK CATEGORIES TABLE
+-- Predefined and custom categories for tasks
+CREATE TABLE task_categories (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    family_id UUID NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+    name VARCHAR(50) NOT NULL,
+    color VARCHAR(20) DEFAULT 'gray',
+    icon VARCHAR(10) DEFAULT '📋',
+    is_default BOOLEAN DEFAULT false,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    
+    UNIQUE(family_id, name)
+);
+
+-- 4. TASKS TABLE
+-- Main tasks table with all task information
+CREATE TABLE tasks (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    family_id UUID NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+    title VARCHAR(200) NOT NULL,
+    description TEXT,
+    assignee_id UUID REFERENCES family_members(id) ON DELETE SET NULL,
+    category_id UUID REFERENCES task_categories(id) ON DELETE SET NULL,
+    priority VARCHAR(10) NOT NULL DEFAULT 'medium' CHECK (priority IN ('low', 'medium', 'high')),
+    status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'completed', 'cancelled')),
+    due_date DATE,
+    due_time TIME,
+    completed_at TIMESTAMP WITH TIME ZONE,
+    completed_by UUID REFERENCES family_members(id),
+    is_recurring BOOLEAN DEFAULT false,
+    recurrence_pattern JSONB, -- For future recurring tasks feature
+    estimated_duration INTEGER, -- in minutes
+    actual_duration INTEGER, -- in minutes
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    created_by UUID REFERENCES family_members(id)
+);
+
+-- 5. PET PROFILES TABLE
+-- Detailed information about family pets
+CREATE TABLE pet_profiles (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    family_id UUID NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+    name VARCHAR(50) NOT NULL,
+    type VARCHAR(20) NOT NULL, -- 'dog', 'cat', 'bird', etc.
+    breed VARCHAR(50),
+    age_years INTEGER,
+    age_months INTEGER,
+    weight_kg DECIMAL(5,2),
+    medical_notes TEXT,
+    feeding_schedule JSONB DEFAULT '[]'::jsonb,
+    care_instructions TEXT,
+    emergency_contact JSONB,
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- 6. PET CARE LOGS TABLE
+-- Track pet care activities
+CREATE TABLE pet_care_logs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    pet_id UUID NOT NULL REFERENCES pet_profiles(id) ON DELETE CASCADE,
+    care_type VARCHAR(30) NOT NULL, -- 'feeding', 'walk', 'medication', 'grooming', etc.
+    performed_by UUID REFERENCES family_members(id),
+    performed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    notes TEXT,
+    next_due TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- 7. TASK COMMENTS TABLE
+-- Comments and updates on tasks
+CREATE TABLE task_comments (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    member_id UUID NOT NULL REFERENCES family_members(id) ON DELETE CASCADE,
+    comment TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- 8. FAMILY STATS TABLE
+-- Track family productivity and statistics
+CREATE TABLE family_stats (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    family_id UUID NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+    date DATE NOT NULL,
+    total_tasks INTEGER DEFAULT 0,
+    completed_tasks INTEGER DEFAULT 0,
+    high_priority_completed INTEGER DEFAULT 0,
+    member_stats JSONB DEFAULT '{}'::jsonb, -- Stats per member
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    
+    UNIQUE(family_id, date)
+);
+
+-- 9. NOTIFICATIONS TABLE
+-- System notifications for family members
+CREATE TABLE notifications (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    family_id UUID NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+    member_id UUID REFERENCES family_members(id) ON DELETE CASCADE,
+    type VARCHAR(30) NOT NULL, -- 'task_due', 'task_assigned', 'pet_care_due', etc.
+    title VARCHAR(100) NOT NULL,
+    message TEXT,
+    is_read BOOLEAN DEFAULT false,
+    related_task_id UUID REFERENCES tasks(id) ON DELETE CASCADE,
+    related_pet_id UUID REFERENCES pet_profiles(id) ON DELETE CASCADE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- INDEXES for better performance
+CREATE INDEX idx_tasks_family_id ON tasks(family_id);
+CREATE INDEX idx_tasks_assignee_id ON tasks(assignee_id);
+CREATE INDEX idx_tasks_due_date ON tasks(due_date);
+CREATE INDEX idx_tasks_status ON tasks(status);
+CREATE INDEX idx_tasks_priority ON tasks(priority);
+CREATE INDEX idx_family_members_family_id ON family_members(family_id);
+CREATE INDEX idx_pet_care_logs_pet_id ON pet_care_logs(pet_id);
+CREATE INDEX idx_pet_care_logs_performed_at ON pet_care_logs(performed_at);
+CREATE INDEX idx_notifications_member_id ON notifications(member_id);
+CREATE INDEX idx_notifications_is_read ON notifications(is_read);
+
+-- TRIGGERS for updated_at timestamps
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
+CREATE TRIGGER update_families_updated_at BEFORE UPDATE ON families FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+CREATE TRIGGER update_family_members_updated_at BEFORE UPDATE ON family_members FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+CREATE TRIGGER update_tasks_updated_at BEFORE UPDATE ON tasks FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+CREATE TRIGGER update_pet_profiles_updated_at BEFORE UPDATE ON pet_profiles FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ROW LEVEL SECURITY POLICIES
+-- Enable RLS on all tables
+ALTER TABLE families ENABLE ROW LEVEL SECURITY;
+ALTER TABLE family_members ENABLE ROW LEVEL SECURITY;
+ALTER TABLE task_categories ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE pet_profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE pet_care_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE task_comments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE family_stats ENABLE ROW LEVEL SECURITY;
+ALTER TABLE notifications ENABLE ROW LEVEL SECURITY;
+
+-- RLS Policies (assuming you'll use Supabase Auth)
+-- Users can only access data from their own family
+
+-- Families: Users can only see their own family
+CREATE POLICY "Users can view own family" ON families FOR SELECT USING (auth.uid()::text = ANY(
+    SELECT member_id::text FROM family_members WHERE family_id = families.id
+));
+
+-- Family Members: Users can only see members from their family
+CREATE POLICY "Users can view family members" ON family_members FOR SELECT USING (
+    family_id IN (
+        SELECT family_id FROM family_members WHERE member_id = auth.uid()
+    )
+);
+
+-- Tasks: Users can only see tasks from their family
+CREATE POLICY "Users can view family tasks" ON tasks FOR SELECT USING (
+    family_id IN (
+        SELECT family_id FROM family_members WHERE member_id = auth.uid()
+    )
+);
+
+-- Similar policies for other tables...
+CREATE POLICY "Users can view family task categories" ON task_categories FOR SELECT USING (
+    family_id IN (SELECT family_id FROM family_members WHERE member_id = auth.uid())
+);
+
+CREATE POLICY "Users can view family pets" ON pet_profiles FOR SELECT USING (
+    family_id IN (SELECT family_id FROM family_members WHERE member_id = auth.uid())
+);
+
+-- INSERT/UPDATE/DELETE policies
+CREATE POLICY "Users can insert family tasks" ON tasks FOR INSERT WITH CHECK (
+    family_id IN (SELECT family_id FROM family_members WHERE member_id = auth.uid())
+);
+
+CREATE POLICY "Users can update family tasks" ON tasks FOR UPDATE USING (
+    family_id IN (SELECT family_id FROM family_members WHERE member_id = auth.uid())
+);
+
+CREATE POLICY "Users can delete family tasks" ON tasks FOR DELETE USING (
+    family_id IN (SELECT family_id FROM family_members WHERE member_id = auth.uid())
+);
+
+-- SAMPLE DATA INSERTION
+-- Insert default task categories
+INSERT INTO task_categories (family_id, name, color, icon, is_default) VALUES
+-- Note: You'll need to replace 'family-uuid-here' with actual family IDs
+-- This is just an example structure
+
+-- VIEWS for common queries
+-- View for task summary by member
+CREATE VIEW task_summary_by_member AS
+SELECT 
+    fm.family_id,
+    fm.id as member_id,
+    fm.name as member_name,
+    fm.role,
+    COUNT(t.id) as total_tasks,
+    COUNT(CASE WHEN t.status = 'completed' THEN 1 END) as completed_tasks,
+    COUNT(CASE WHEN t.status = 'pending' THEN 1 END) as pending_tasks,
+    COUNT(CASE WHEN t.priority = 'high' AND t.status = 'pending' THEN 1 END) as high_priority_pending
+FROM family_members fm
+LEFT JOIN tasks t ON fm.id = t.assignee_id
+GROUP BY fm.family_id, fm.id, fm.name, fm.role;
+
+-- View for today's tasks
+CREATE VIEW todays_tasks AS
+SELECT 
+    t.*,
+    fm.name as assignee_name,
+    fm.role as assignee_role,
+    tc.name as category_name,
+    tc.color as category_color
+FROM tasks t
+LEFT JOIN family_members fm ON t.assignee_id = fm.id
+LEFT JOIN task_categories tc ON t.category_id = tc.id
+WHERE t.due_date = CURRENT_DATE
+ORDER BY t.priority DESC, t.created_at ASC;
+
+-- View for overdue tasks
+CREATE VIEW overdue_tasks AS
+SELECT 
+    t.*,
+    fm.name as assignee_name,
+    fm.role as assignee_role
+FROM tasks t
+LEFT JOIN family_members fm ON t.assignee_id = fm.id
+WHERE t.due_date < CURRENT_DATE 
+AND t.status != 'completed'
+ORDER BY t.due_date ASC;
+
+-- FUNCTIONS for common operations
+-- Function to mark task as completed
+CREATE OR REPLACE FUNCTION complete_task(task_uuid UUID, completed_by_uuid UUID)
+RETURNS BOOLEAN AS $$
+BEGIN
+    UPDATE tasks 
+    SET 
+        status = 'completed',
+        completed_at = NOW(),
+        completed_by = completed_by_uuid,
+        updated_at = NOW()
+    WHERE id = task_uuid;
+    
+    RETURN FOUND;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function to get family dashboard data
+CREATE OR REPLACE FUNCTION get_family_dashboard(family_uuid UUID)
+RETURNS JSON AS $$
+DECLARE
+    result JSON;
+BEGIN
+    SELECT json_build_object(
+        'total_tasks', (SELECT COUNT(*) FROM tasks WHERE family_id = family_uuid),
+        'completed_today', (SELECT COUNT(*) FROM tasks WHERE family_id = family_uuid AND DATE(completed_at) = CURRENT_DATE),
+        'pending_tasks', (SELECT COUNT(*) FROM tasks WHERE family_id = family_uuid AND status = 'pending'),
+        'overdue_tasks', (SELECT COUNT(*) FROM tasks WHERE family_id = family_uuid AND due_date < CURRENT_DATE AND status != 'completed'),
+        'high_priority_pending', (SELECT COUNT(*) FROM tasks WHERE family_id = family_uuid AND priority = 'high' AND status = 'pending')
+    ) INTO result;
+    
+    RETURN result;
+END;
+$$ LANGUAGE plpgsql;
